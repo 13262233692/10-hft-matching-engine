@@ -10,6 +10,7 @@
 #include <thread>
 #include <random>
 #include <chrono>
+#include <vector>
 
 std::atomic<bool> g_running(true);
 
@@ -57,6 +58,49 @@ void orderSimulator(HFT::OrderBook& orderBook, std::atomic<uint64_t>& orderIdCou
     }
 }
 
+void cancelSimulator(HFT::OrderBook& orderBook, std::atomic<uint64_t>& orderIdCounter) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<uint64_t> cancelDist(1, 1000);
+
+    std::cout << "[CANCEL-SIM] Starting cancel simulator..." << std::endl;
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    while (g_running.load()) {
+        uint64_t targetId = (cancelDist(gen) % orderIdCounter.load()) + 1;
+        orderBook.cancelOrder(targetId);
+        orderBook.tryReclaim();
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(30 + (gen() % 70)));
+    }
+}
+
+void highFrequencySimulator(HFT::OrderBook& orderBook, std::atomic<uint64_t>& orderIdCounter, int threadId) {
+    std::random_device rd;
+    std::mt19937 gen(rd() + threadId);
+    std::uniform_int_distribution<int> sideDist(0, 1);
+    std::uniform_int_distribution<uint64_t> qtyDist(1, 20);
+    std::normal_distribution<> priceDist(1000000, 300);
+
+    while (g_running.load()) {
+        HFT::Side side = (sideDist(gen) == 0) ? HFT::Side::BUY : HFT::Side::SELL;
+        int64_t price = static_cast<int64_t>(priceDist(gen));
+        price = (price / 50) * 50;
+        uint64_t qty = qtyDist(gen);
+
+        HFT::Order* order = new HFT::Order(++orderIdCounter, side, price, qty, "BTC-USDT");
+        orderBook.addOrder(order);
+
+        if (gen() % 10 == 0) {
+            uint64_t targetId = (gen() % orderIdCounter.load()) + 1;
+            orderBook.cancelOrder(targetId);
+        }
+
+        orderBook.tryReclaim();
+    }
+}
+
 int main(int argc, char* argv[]) {
     uint16_t tcpPort = (argc > 1) ? static_cast<uint16_t>(std::atoi(argv[1])) : 12345;
     uint16_t wsPort = (argc > 2) ? static_cast<uint16_t>(std::atoi(argv[2])) : 8080;
@@ -67,7 +111,8 @@ int main(int argc, char* argv[]) {
 #endif
 
     std::cout << "========================================" << std::endl;
-    std::cout << "  HFT Matching Engine v1.0" << std::endl;
+    std::cout << "  HFT Matching Engine v2.0" << std::endl;
+    std::cout << "  (Lock-free + Hazard Pointers)" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << "Symbol: BTC-USDT" << std::endl;
     std::cout << "TCP Port (FIX): " << tcpPort << std::endl;
@@ -102,12 +147,19 @@ int main(int argc, char* argv[]) {
     }
 
     std::thread simThread(orderSimulator, std::ref(*orderBook), std::ref(orderIdCounter));
+    std::thread cancelThread(cancelSimulator, std::ref(*orderBook), std::ref(orderIdCounter));
+
+    const int HF_THREADS = 3;
+    std::vector<std::thread> hfThreads;
+    for (int i = 0; i < HF_THREADS; ++i) {
+        hfThreads.emplace_back(highFrequencySimulator, std::ref(*orderBook), std::ref(orderIdCounter), i);
+    }
 
     std::cout << "[Main] Servers started successfully" << std::endl;
+    std::cout << "[Main] " << (3 + HF_THREADS) << " concurrent sim threads running" << std::endl;
     std::cout << "[Main] Press Ctrl+C to stop..." << std::endl;
 
     while (g_running.load()) {
-        auto snapshot = orderBook->getSnapshot(5);
         std::cout << "\r[STATS] Orders=" << orderBook->getTotalOrderCount()
                   << " BidLevels=" << orderBook->getBidCount()
                   << " AskLevels=" << orderBook->getAskCount()
@@ -116,14 +168,18 @@ int main(int argc, char* argv[]) {
                   << " BestAsk=" << (orderBook->getBestAsk() / 10000.0)
                   << " TCP=" << tcpServer.getConnectedClients()
                   << " WS=" << wsServer.getConnectedClients()
+                  << " Retired=" << HFT::HazardPointerManager::instance().retiredCount()
                   << "          " << std::flush;
 
+        orderBook->tryReclaim();
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 
     std::cout << std::endl;
-    if (simThread.joinable()) {
-        simThread.join();
+    if (simThread.joinable()) simThread.join();
+    if (cancelThread.joinable()) cancelThread.join();
+    for (auto& t : hfThreads) {
+        if (t.joinable()) t.join();
     }
     tcpServer.stop();
     wsServer.stop();

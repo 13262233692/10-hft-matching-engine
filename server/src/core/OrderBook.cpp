@@ -11,9 +11,13 @@ OrderBook::~OrderBook() {
 }
 
 void OrderBook::clear() {
-    std::lock_guard<std::mutex> lock(mutex);
+    WriteGuard guard(bookLock);
     for (auto& [id, order] : orderMap) {
-        delete order;
+        if (!order->isRetired()) {
+            order->markRetired();
+            HazardPointerManager::instance().retireNode(
+                order, &SafeDeleter::deleteOrder);
+        }
     }
     orderMap.clear();
     orderSideMap.clear();
@@ -40,7 +44,7 @@ OrderQueue* OrderBook::getQueue(RedBlackTree& tree, int64_t price) {
     return nullptr;
 }
 
-void OrderBook::updatePriceLevel(RedBlackTree& tree, Side side, int64_t price,
+void OrderBook::updatePriceLevel(RedBlackTree& tree, Side, int64_t price,
                                int64_t quantityDelta, int32_t orderCountDelta) {
     RBNode* node = tree.find(price);
     if (!node) return;
@@ -51,42 +55,76 @@ void OrderBook::updatePriceLevel(RedBlackTree& tree, Side side, int64_t price,
         static_cast<int32_t>(node->orderCount) + orderCountDelta);
 
     if (node->orderCount == 0) {
+        OrderQueue* q = static_cast<OrderQueue*>(node->queue);
+        if (q) {
+            delete q;
+        }
+        node->queue = nullptr;
         tree.remove(price);
+    }
+}
+
+void OrderBook::fireTradeCallback(const Trade& trade) {
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    if (tradeCallback) {
+        tradeCallback(trade);
+    }
+}
+
+void OrderBook::fireOrderCallback(const Order& order, OrderStatus status) {
+    std::lock_guard<std::mutex> lock(callbackMutex);
+    if (orderCallback) {
+        orderCallback(order, status);
     }
 }
 
 void OrderBook::addOrder(Order* order) {
     if (!order) return;
 
-    std::lock_guard<std::mutex> lock(mutex);
+    std::vector<std::pair<Order*, OrderStatus>> orderNotifications;
+    Order* orderToDelete = nullptr;
 
-    order->orderId = order->clientOrderId;
-    order->timestamp = std::chrono::high_resolution_clock::now()
-        .time_since_epoch().count();
+    {
+        WriteGuard guard(bookLock);
 
-    if (orderCallback) {
-        orderCallback(*order, OrderStatus::PENDING);
+        order->orderId = order->clientOrderId;
+        order->timestamp = std::chrono::high_resolution_clock::now()
+            .time_since_epoch().count();
+
+        if (orderCallback) {
+            orderNotifications.push_back({order, OrderStatus::PENDING});
+        }
+
+        matchOrder(order);
+
+        if (!order->isFilled() && order->status != OrderStatus::REJECTED) {
+            addOrderToBook(order);
+            order->status = OrderStatus::ACTIVE;
+            if (orderCallback) {
+                orderNotifications.push_back({order, OrderStatus::ACTIVE});
+            }
+        } else if (order->isFilled()) {
+            order->status = OrderStatus::FILLED;
+            if (orderCallback) {
+                orderNotifications.push_back({order, OrderStatus::FILLED});
+            }
+            orderToDelete = order;
+        } else {
+            orderToDelete = order;
+        }
+
+        sequenceNumber++;
     }
 
-    matchOrder(order);
-
-    if (!order->isFilled() && order->status != OrderStatus::REJECTED) {
-        addOrderToBook(order);
-        order->status = OrderStatus::ACTIVE;
-        if (orderCallback) {
-            orderCallback(*order, OrderStatus::ACTIVE);
-        }
-    } else if (order->isFilled()) {
-        order->status = OrderStatus::FILLED;
-        if (orderCallback) {
-            orderCallback(*order, OrderStatus::FILLED);
-        }
-        delete order;
-    } else {
-        delete order;
+    for (auto& [ord, st] : orderNotifications) {
+        fireOrderCallback(*ord, st);
     }
 
-    sequenceNumber++;
+    if (orderToDelete) {
+        orderToDelete->markRetired();
+        HazardPointerManager::instance().retireNode(
+            orderToDelete, &SafeDeleter::deleteOrder);
+    }
 }
 
 void OrderBook::matchOrder(Order* order) {
@@ -123,17 +161,13 @@ void OrderBook::matchBuyOrder(Order* buyOrder) {
             orderSideMap.erase(sellOrder->orderId);
             updatePriceLevel(askTree, Side::SELL, bestAsk->price,
                            -static_cast<int64_t>(tradeQty), -1);
-            if (orderCallback) {
-                orderCallback(*sellOrder, OrderStatus::FILLED);
-            }
-            delete sellOrder;
+            sellOrder->markRetired();
+            HazardPointerManager::instance().retireNode(
+                sellOrder, &SafeDeleter::deleteOrder);
         } else {
             sellOrder->status = OrderStatus::PARTIAL_FILLED;
             updatePriceLevel(askTree, Side::SELL, bestAsk->price,
                            -static_cast<int64_t>(tradeQty), 0);
-            if (orderCallback) {
-                orderCallback(*sellOrder, OrderStatus::PARTIAL_FILLED);
-            }
         }
     }
 }
@@ -164,17 +198,13 @@ void OrderBook::matchSellOrder(Order* sellOrder) {
             orderSideMap.erase(buyOrder->orderId);
             updatePriceLevel(bidTree, Side::BUY, bestBid->price,
                            -static_cast<int64_t>(tradeQty), -1);
-            if (orderCallback) {
-                orderCallback(*buyOrder, OrderStatus::FILLED);
-            }
-            delete buyOrder;
+            buyOrder->markRetired();
+            HazardPointerManager::instance().retireNode(
+                buyOrder, &SafeDeleter::deleteOrder);
         } else {
             buyOrder->status = OrderStatus::PARTIAL_FILLED;
             updatePriceLevel(bidTree, Side::BUY, bestBid->price,
                            -static_cast<int64_t>(tradeQty), 0);
-            if (orderCallback) {
-                orderCallback(*buyOrder, OrderStatus::PARTIAL_FILLED);
-            }
         }
     }
 }
@@ -187,9 +217,7 @@ void OrderBook::executeTrade(Order* buyOrder, Order* sellOrder,
     Trade trade(++tradeIdCounter, buyOrder->orderId, sellOrder->orderId,
                 price, quantity, symbol);
 
-    if (tradeCallback) {
-        tradeCallback(trade);
-    }
+    fireTradeCallback(trade);
 }
 
 void OrderBook::addOrderToBook(Order* order) {
@@ -205,40 +233,47 @@ void OrderBook::addOrderToBook(Order* order) {
 }
 
 bool OrderBook::cancelOrder(uint64_t orderId) {
-    std::lock_guard<std::mutex> lock(mutex);
+    Order* orderToRetire = nullptr;
 
-    auto it = orderMap.find(orderId);
-    if (it == orderMap.end()) {
-        return false;
+    {
+        WriteGuard guard(bookLock);
+
+        auto it = orderMap.find(orderId);
+        if (it == orderMap.end()) {
+            return false;
+        }
+
+        Order* order = it->second;
+        Side side = orderSideMap[orderId];
+        int64_t price = order->price;
+        RedBlackTree& tree = (side == Side::BUY) ? bidTree : askTree;
+
+        OrderQueue* queue = getQueue(tree, price);
+        if (queue) {
+            queue->remove(orderId);
+            updatePriceLevel(tree, side, price,
+                            -static_cast<int64_t>(order->getRemainingQuantity()), -1);
+        }
+
+        order->status = OrderStatus::CANCELLED;
+        orderMap.erase(it);
+        orderSideMap.erase(orderId);
+
+        orderToRetire = order;
+        sequenceNumber++;
     }
 
-    Order* order = it->second;
-    Side side = orderSideMap[orderId];
-    int64_t price = order->price;
-    RedBlackTree& tree = (side == Side::BUY) ? bidTree : askTree;
+    fireOrderCallback(*orderToRetire, OrderStatus::CANCELLED);
 
-    OrderQueue* queue = getQueue(tree, price);
-    if (queue) {
-        queue->remove(orderId);
-        updatePriceLevel(tree, side, price,
-                        -static_cast<int64_t>(order->getRemainingQuantity()), -1);
-    }
+    orderToRetire->markRetired();
+    HazardPointerManager::instance().retireNode(
+        orderToRetire, &SafeDeleter::deleteOrder);
 
-    order->status = OrderStatus::CANCELLED;
-    if (orderCallback) {
-        orderCallback(*order, OrderStatus::CANCELLED);
-    }
-
-    orderMap.erase(it);
-    orderSideMap.erase(orderId);
-    delete order;
-
-    sequenceNumber++;
     return true;
 }
 
 Order* OrderBook::findOrder(uint64_t orderId) const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     auto it = orderMap.find(orderId);
     if (it != orderMap.end()) {
         return it->second;
@@ -247,19 +282,19 @@ Order* OrderBook::findOrder(uint64_t orderId) const {
 }
 
 int64_t OrderBook::getBestBid() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     RBNode* maxBid = bidTree.getMaximum();
     return maxBid ? maxBid->price : 0;
 }
 
 int64_t OrderBook::getBestAsk() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     RBNode* minAsk = askTree.getMinimum();
     return minAsk ? minAsk->price : 0;
 }
 
 uint64_t OrderBook::getBestBidQuantity() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     RBNode* maxBid = bidTree.getMaximum();
     if (maxBid && maxBid->queue) {
         return static_cast<OrderQueue*>(maxBid->queue)->totalQuantity();
@@ -268,7 +303,7 @@ uint64_t OrderBook::getBestBidQuantity() const {
 }
 
 uint64_t OrderBook::getBestAskQuantity() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     RBNode* minAsk = askTree.getMinimum();
     if (minAsk && minAsk->queue) {
         return static_cast<OrderQueue*>(minAsk->queue)->totalQuantity();
@@ -277,17 +312,17 @@ uint64_t OrderBook::getBestAskQuantity() const {
 }
 
 size_t OrderBook::getBidCount() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     return bidTree.size();
 }
 
 size_t OrderBook::getAskCount() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     return askTree.size();
 }
 
 size_t OrderBook::getTotalOrderCount() const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
     return orderMap.size();
 }
 
@@ -313,7 +348,7 @@ void OrderBook::collectPriceLevels(const RedBlackTree& tree,
 }
 
 OrderBookSnapshot OrderBook::getSnapshot(size_t depth) const {
-    std::lock_guard<std::mutex> lock(mutex);
+    ReadGuard guard(bookLock);
 
     OrderBookSnapshot snapshot;
     snapshot.timestamp = std::chrono::high_resolution_clock::now()

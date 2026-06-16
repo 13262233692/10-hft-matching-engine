@@ -6,10 +6,12 @@
 int testOrderBook();
 int testFIXParser();
 int testPerformance();
+int testConcurrent();
 
 int main() {
     std::cout << "========================================" << std::endl;
-    std::cout << "  HFT Matching Engine Tests" << std::endl;
+    std::cout << "  HFT Matching Engine Tests v2.0" << std::endl;
+    std::cout << "  (Lock-free + Hazard Pointers)" << std::endl;
     std::cout << "========================================" << std::endl;
 
     int failed = 0;
@@ -22,6 +24,9 @@ int main() {
 
     std::cout << "\n[TEST] Running Performance tests..." << std::endl;
     failed += testPerformance();
+
+    std::cout << "\n[TEST] Running Concurrent stress tests..." << std::endl;
+    failed += testConcurrent();
 
     std::cout << "\n========================================" << std::endl;
     if (failed == 0) {

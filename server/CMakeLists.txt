@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(HFTMatchingEngine VERSION 1.0.0 LANGUAGES CXX)
+project(HFTMatchingEngine VERSION 2.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -36,6 +36,7 @@ set(TEST_SOURCES
     tests/test_order_book.cpp
     tests/test_fix_parser.cpp
     tests/test_performance.cpp
+    tests/test_concurrent.cpp
     src/core/Order.cpp
     src/core/FIXParser.cpp
     src/core/OrderBook.cpp

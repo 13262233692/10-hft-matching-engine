@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <chrono>
+#include <atomic>
 
 namespace HFT {
 
@@ -38,17 +39,20 @@ struct Order {
     std::string symbol;
     Order* prev;
     Order* next;
+    std::atomic<bool> retired;
 
     Order()
         : orderId(0), clientOrderId(0), side(Side::BUY), type(OrderType::LIMIT),
           price(0), quantity(0), filledQuantity(0), timestamp(0),
-          status(OrderStatus::PENDING), prev(nullptr), next(nullptr) {}
+          status(OrderStatus::PENDING), prev(nullptr), next(nullptr),
+          retired(false) {}
 
     Order(uint64_t id, Side s, int64_t p, uint64_t q, const std::string& sym,
           OrderType t = OrderType::LIMIT)
         : orderId(id), clientOrderId(id), side(s), type(t), price(p),
           quantity(q), filledQuantity(0), status(OrderStatus::ACTIVE),
-          symbol(sym), prev(nullptr), next(nullptr) {
+          symbol(sym), prev(nullptr), next(nullptr),
+          retired(false) {
         timestamp = std::chrono::high_resolution_clock::now()
             .time_since_epoch().count();
     }
@@ -59,6 +63,14 @@ struct Order {
 
     bool isFilled() const {
         return filledQuantity >= quantity;
+    }
+
+    bool isRetired() const {
+        return retired.load(std::memory_order_acquire);
+    }
+
+    void markRetired() {
+        retired.store(true, std::memory_order_release);
     }
 };
 

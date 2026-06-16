@@ -1,4 +1,5 @@
 #include "core/OrderQueue.h"
+#include "concurrent/HazardPointer.h"
 
 namespace HFT {
 
@@ -10,12 +11,16 @@ OrderQueue::~OrderQueue() {
 }
 
 void OrderQueue::clear() {
+    WriteGuard guard(queueLock);
     Order* current = head;
     while (current) {
-        Order* next = current->next;
+        Order* nextPtr = current->next;
         current->prev = nullptr;
         current->next = nullptr;
-        current = next;
+        if (!current->isRetired()) {
+            current->markRetired();
+        }
+        current = nextPtr;
     }
     head = nullptr;
     tail = nullptr;
@@ -26,6 +31,8 @@ void OrderQueue::clear() {
 
 void OrderQueue::push_back(Order* order) {
     if (!order) return;
+
+    WriteGuard guard(queueLock);
 
     order->prev = tail;
     order->next = nullptr;
@@ -43,6 +50,8 @@ void OrderQueue::push_back(Order* order) {
 }
 
 Order* OrderQueue::pop_front() {
+    WriteGuard guard(queueLock);
+
     if (!head) return nullptr;
 
     Order* order = head;
@@ -65,6 +74,8 @@ Order* OrderQueue::pop_front() {
 }
 
 bool OrderQueue::remove(uint64_t orderId) {
+    WriteGuard guard(queueLock);
+
     auto it = orderMap.find(orderId);
     if (it == orderMap.end()) {
         return false;
@@ -94,7 +105,54 @@ bool OrderQueue::remove(uint64_t orderId) {
     return true;
 }
 
+bool OrderQueue::safeRemove(uint64_t orderId) {
+    WriteGuard guard(queueLock);
+
+    auto it = orderMap.find(orderId);
+    if (it == orderMap.end()) {
+        return false;
+    }
+
+    Order* order = it->second;
+
+    if (order->prev) {
+        order->prev->next = order->next;
+    } else {
+        head = order->next;
+    }
+
+    if (order->next) {
+        order->next->prev = order->prev;
+    } else {
+        tail = order->prev;
+    }
+
+    totalQty -= order->getRemainingQuantity();
+    orderCount--;
+    orderMap.erase(it);
+
+    order->markRetired();
+    order->prev = nullptr;
+    order->next = nullptr;
+
+    HazardPointerManager::instance().retireNode(
+        order, &SafeDeleter::deleteOrder);
+
+    return true;
+}
+
+Order* OrderQueue::safeNext(Order* current) const {
+    while (current) {
+        current = current->next;
+        if (!current || !current->isRetired()) {
+            return current;
+        }
+    }
+    return nullptr;
+}
+
 Order* OrderQueue::find(uint64_t orderId) const {
+    ReadGuard guard(queueLock);
     auto it = orderMap.find(orderId);
     if (it != orderMap.end()) {
         return it->second;

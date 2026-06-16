@@ -3,6 +3,8 @@
 #include "core/Order.h"
 #include "core/RedBlackTree.h"
 #include "core/OrderQueue.h"
+#include "concurrent/SpinLock.h"
+#include "concurrent/HazardPointer.h"
 #include <vector>
 #include <unordered_map>
 #include <functional>
@@ -89,13 +91,18 @@ public:
 
     void clear();
 
+    void tryReclaim() {
+        HazardPointerManager::instance().scanAndReclaim();
+    }
+
 private:
     std::string symbol;
     RedBlackTree bidTree;
     RedBlackTree askTree;
     std::unordered_map<uint64_t, Order*> orderMap;
     std::unordered_map<uint64_t, Side> orderSideMap;
-    mutable std::mutex mutex;
+    mutable RWSpinLock bookLock;
+    std::mutex callbackMutex;
     uint64_t sequenceNumber;
     uint64_t tradeIdCounter;
 
@@ -124,6 +131,9 @@ private:
 
     void collectPriceLevels(const RedBlackTree& tree, std::vector<PriceLevel>& levels,
                             size_t depth, bool reverse) const;
+
+    void fireTradeCallback(const Trade& trade);
+    void fireOrderCallback(const Order& order, OrderStatus status);
 };
 
 }

@@ -41,6 +41,7 @@ bool FIXParser::parseNewOrder(const FIXMessage& msg, Order& outOrder) {
     auto itQty = msg.fields.find(38);
     auto itSymbol = msg.fields.find(55);
     auto itOrdType = msg.fields.find(40);
+    auto itMaxShow = msg.fields.find(210);
 
     if (itClOrdID == msg.fields.end() || itSide == msg.fields.end() ||
         itPrice == msg.fields.end() || itQty == msg.fields.end() ||
@@ -60,6 +61,18 @@ bool FIXParser::parseNewOrder(const FIXMessage& msg, Order& outOrder) {
 
     if (itOrdType != msg.fields.end()) {
         outOrder.type = parseOrderType(itOrdType->second);
+    }
+
+    if (itMaxShow != msg.fields.end()) {
+        uint64_t maxShow = std::strtoull(itMaxShow->second.c_str(), nullptr, 10);
+        if (maxShow > 0 && maxShow < qty) {
+            outOrder.type = OrderType::ICEBERG;
+            outOrder.isIceberg = true;
+            outOrder.peakQuantity = maxShow;
+            outOrder.visibleQuantity = maxShow;
+            outOrder.hiddenQuantity = qty - maxShow;
+            outOrder.visibleFilledQuantity = 0;
+        }
     }
 
     outOrder.status = OrderStatus::ACTIVE;

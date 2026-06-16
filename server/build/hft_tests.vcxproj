@@ -377,6 +377,7 @@ if %errorlevel% neq 0 goto :VCEnd</Command>
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\tests\test_fix_parser.cpp" />
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\tests\test_performance.cpp" />
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\tests\test_concurrent.cpp" />
+    <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\tests\test_iceberg.cpp" />
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\src\core\Order.cpp" />
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\src\core\FIXParser.cpp" />
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\src\core\OrderBook.cpp" />

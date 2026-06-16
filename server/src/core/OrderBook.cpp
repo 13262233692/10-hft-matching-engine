@@ -97,13 +97,13 @@ void OrderBook::addOrder(Order* order) {
 
         matchOrder(order);
 
-        if (!order->isFilled() && order->status != OrderStatus::REJECTED) {
+        if (!order->isTotallyFilled() && order->status != OrderStatus::REJECTED) {
             addOrderToBook(order);
             order->status = OrderStatus::ACTIVE;
             if (orderCallback) {
                 orderNotifications.push_back({order, OrderStatus::ACTIVE});
             }
-        } else if (order->isFilled()) {
+        } else if (order->isTotallyFilled()) {
             order->status = OrderStatus::FILLED;
             if (orderCallback) {
                 orderNotifications.push_back({order, OrderStatus::FILLED});
@@ -136,7 +136,7 @@ void OrderBook::matchOrder(Order* order) {
 }
 
 void OrderBook::matchBuyOrder(Order* buyOrder) {
-    while (!buyOrder->isFilled() && !askTree.isEmpty()) {
+    while (!buyOrder->isTotallyFilled() && !askTree.isEmpty()) {
         RBNode* bestAsk = askTree.getMinimum();
         if (!bestAsk) break;
 
@@ -155,7 +155,32 @@ void OrderBook::matchBuyOrder(Order* buyOrder) {
 
         executeTrade(buyOrder, sellOrder, bestAsk->price, tradeQty);
 
-        if (sellOrder->isFilled()) {
+        if (sellOrder->isIceberg && sellOrder->isVisiblePeakFilled()) {
+            if (sellOrder->isTotallyFilled()) {
+                queue->pop_front();
+                orderMap.erase(sellOrder->orderId);
+                orderSideMap.erase(sellOrder->orderId);
+                updatePriceLevel(askTree, Side::SELL, bestAsk->price,
+                               -static_cast<int64_t>(tradeQty), -1);
+                sellOrder->markRetired();
+                HazardPointerManager::instance().retireNode(
+                    sellOrder, &SafeDeleter::deleteOrder);
+            } else {
+                uint64_t oldVisibleQty = sellOrder->visibleQuantity;
+                sellOrder->replenishPeak();
+                uint64_t newVisibleQty = sellOrder->getVisibleRemaining();
+
+                queue->pop_front();
+                queue->push_back(sellOrder);
+
+                int64_t qtyDelta = static_cast<int64_t>(newVisibleQty)
+                                 - static_cast<int64_t>(oldVisibleQty);
+                updatePriceLevel(askTree, Side::SELL, bestAsk->price,
+                               qtyDelta, 0);
+
+                sellOrder->status = OrderStatus::PARTIAL_FILLED;
+            }
+        } else if (sellOrder->isTotallyFilled()) {
             queue->pop_front();
             orderMap.erase(sellOrder->orderId);
             orderSideMap.erase(sellOrder->orderId);
@@ -173,7 +198,7 @@ void OrderBook::matchBuyOrder(Order* buyOrder) {
 }
 
 void OrderBook::matchSellOrder(Order* sellOrder) {
-    while (!sellOrder->isFilled() && !bidTree.isEmpty()) {
+    while (!sellOrder->isTotallyFilled() && !bidTree.isEmpty()) {
         RBNode* bestBid = bidTree.getMaximum();
         if (!bestBid) break;
 
@@ -192,7 +217,32 @@ void OrderBook::matchSellOrder(Order* sellOrder) {
 
         executeTrade(buyOrder, sellOrder, bestBid->price, tradeQty);
 
-        if (buyOrder->isFilled()) {
+        if (buyOrder->isIceberg && buyOrder->isVisiblePeakFilled()) {
+            if (buyOrder->isTotallyFilled()) {
+                queue->pop_front();
+                orderMap.erase(buyOrder->orderId);
+                orderSideMap.erase(buyOrder->orderId);
+                updatePriceLevel(bidTree, Side::BUY, bestBid->price,
+                               -static_cast<int64_t>(tradeQty), -1);
+                buyOrder->markRetired();
+                HazardPointerManager::instance().retireNode(
+                    buyOrder, &SafeDeleter::deleteOrder);
+            } else {
+                uint64_t oldVisibleQty = buyOrder->visibleQuantity;
+                buyOrder->replenishPeak();
+                uint64_t newVisibleQty = buyOrder->getVisibleRemaining();
+
+                queue->pop_front();
+                queue->push_back(buyOrder);
+
+                int64_t qtyDelta = static_cast<int64_t>(newVisibleQty)
+                                 - static_cast<int64_t>(oldVisibleQty);
+                updatePriceLevel(bidTree, Side::BUY, bestBid->price,
+                               qtyDelta, 0);
+
+                buyOrder->status = OrderStatus::PARTIAL_FILLED;
+            }
+        } else if (buyOrder->isTotallyFilled()) {
             queue->pop_front();
             orderMap.erase(buyOrder->orderId);
             orderSideMap.erase(buyOrder->orderId);
@@ -211,11 +261,13 @@ void OrderBook::matchSellOrder(Order* sellOrder) {
 
 void OrderBook::executeTrade(Order* buyOrder, Order* sellOrder,
                             int64_t price, uint64_t quantity) {
-    buyOrder->filledQuantity += quantity;
-    sellOrder->filledQuantity += quantity;
+    buyOrder->fillVisible(quantity);
+    sellOrder->fillVisible(quantity);
 
     Trade trade(++tradeIdCounter, buyOrder->orderId, sellOrder->orderId,
                 price, quantity, symbol);
+    trade.buyIsIceberg = buyOrder->isIceberg;
+    trade.sellIsIceberg = sellOrder->isIceberg;
 
     fireTradeCallback(trade);
 }
@@ -250,9 +302,10 @@ bool OrderBook::cancelOrder(uint64_t orderId) {
 
         OrderQueue* queue = getQueue(tree, price);
         if (queue) {
+            uint64_t visibleRemaining = order->getRemainingQuantity();
             queue->remove(orderId);
             updatePriceLevel(tree, side, price,
-                            -static_cast<int64_t>(order->getRemainingQuantity()), -1);
+                            -static_cast<int64_t>(visibleRemaining), -1);
         }
 
         order->status = OrderStatus::CANCELLED;

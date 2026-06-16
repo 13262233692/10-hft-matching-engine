@@ -7,11 +7,12 @@ int testOrderBook();
 int testFIXParser();
 int testPerformance();
 int testConcurrent();
+int testIceberg();
 
 int main() {
     std::cout << "========================================" << std::endl;
-    std::cout << "  HFT Matching Engine Tests v2.0" << std::endl;
-    std::cout << "  (Lock-free + Hazard Pointers)" << std::endl;
+    std::cout << "  HFT Matching Engine Tests v3.0" << std::endl;
+    std::cout << "  (Lock-free + Hazard Pointers + Iceberg)" << std::endl;
     std::cout << "========================================" << std::endl;
 
     int failed = 0;
@@ -21,6 +22,9 @@ int main() {
 
     std::cout << "\n[TEST] Running FIXParser tests..." << std::endl;
     failed += testFIXParser();
+
+    std::cout << "\n[TEST] Running Iceberg Order tests..." << std::endl;
+    failed += testIceberg();
 
     std::cout << "\n[TEST] Running Performance tests..." << std::endl;
     failed += testPerformance();

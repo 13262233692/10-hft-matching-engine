@@ -16,6 +16,9 @@
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\tests\test_concurrent.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\tests\test_iceberg.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="D:\SOLO-12\10-hft-matching-engine\server\src\core\Order.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>

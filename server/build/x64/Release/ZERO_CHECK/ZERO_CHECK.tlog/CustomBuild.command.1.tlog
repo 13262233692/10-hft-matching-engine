@@ -1,0 +1,10 @@
+^D:\SOLO-12\10-HFT-MATCHING-ENGINE\SERVER\BUILD\CMAKEFILES\0F5D79DD4248C0837281765CCF542AD8\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SD:/SOLO-12/10-hft-matching-engine/server -BD:/SOLO-12/10-hft-matching-engine/server/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file D:/SOLO-12/10-hft-matching-engine/server/build/HFTMatchingEngine.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
